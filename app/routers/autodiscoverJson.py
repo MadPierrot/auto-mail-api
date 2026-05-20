@@ -1,28 +1,28 @@
-# app/routers/autodiscover.py
-
 import logging
-import os
 from typing import Optional
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, EmailStr
 
+from app.config import settings
+
 logger = logging.getLogger("auto-mail-api")
 
 router = APIRouter(
     prefix="/autodiscover/autodiscover.json",
-    tags=["autodiscover"],
+    tags=["autodiscover-json"],
 )
 
-PROTOCOL_URLS: dict[str, str] = {
-    # "ActiveSync": os.getenv("ACTIVESYNC_URL", "https://mail.cyberpunk.sbs/Microsoft-Server-ActiveSync"),
-    "AutodiscoverV1": os.getenv("AUTODISCOVER_V1_URL", "https://autodiscover.cyberpunk.sbs/autodiscover/autodiscover.xml"),
-    # "Ews": os.getenv("EWS_URL", "https://mail.cyberpunk.sbs/EWS/Exchange.asmx"),
-}
-
-# Protocolli che supportano GET (non richiedono body)
 GET_PROTOCOLS = {"AutodiscoverV1"}
+
+
+def get_protocol_urls() -> dict[str, str]:
+    return {
+        "ActiveSync": settings.activesync_url,
+        "AutodiscoverV1": settings.autodiscover_v1_url,
+        "Ews": settings.ews_url,
+    }
 
 
 class AutodiscoverRequest(BaseModel):
@@ -48,13 +48,14 @@ async def autodiscover_v1_get(
         return PlainTextResponse(content="Must be a POST request", status_code=400)
 
     if RedirectCount and RedirectCount > 2:
-        return PlainTextResponse(content="Loop detected: troppi redirect", status_code=508)
+        return PlainTextResponse(
+            content="Loop detected: troppi redirect", status_code=508
+        )
 
-    url = PROTOCOL_URLS.get(Protocol)
+    url = get_protocol_urls().get(Protocol)
     if url is None:
         return PlainTextResponse(
-            content=f"Protocollo non supportato: '{Protocol}'",
-            status_code=400,
+            content=f"Protocollo non supportato: '{Protocol}'", status_code=400
         )
 
     logger.debug("Autodiscover GET: email=%s protocol=%s url=%s", email, Protocol, url)
@@ -71,17 +72,28 @@ async def autodiscover_v1_post(
     """Microsoft Autodiscover JSON v1.0 — POST per ActiveSync, EWS, ecc."""
     logger.debug(
         "Autodiscover POST: email=%s protocol=%s redirect_count=%s",
-        body.EMailAddress, Protocol, RedirectCount,
+        body.EMailAddress,
+        Protocol,
+        RedirectCount,
     )
 
     if RedirectCount and RedirectCount > 2:
-        return PlainTextResponse(content="Loop detected: troppi redirect", status_code=508)
+        return PlainTextResponse(
+            content="Loop detected: troppi redirect", status_code=508
+        )
 
-    url = PROTOCOL_URLS.get(Protocol)
+    protocol_urls = get_protocol_urls()
+    url = protocol_urls.get(Protocol)
     if url is None:
         return PlainTextResponse(
-            content=f"Protocollo non supportato: '{Protocol}'. Supportati: {list(PROTOCOL_URLS.keys())}",
+            content=f"Protocollo non supportato: '{Protocol}'. Supportati: {list(protocol_urls.keys())}",
             status_code=400,
         )
 
+    logger.debug(
+        "Autodiscover POST: email=%s protocol=%s url=%s",
+        body.EMailAddress,
+        Protocol,
+        url,
+    )
     return AutodiscoverResponse(Protocol=Protocol, Url=url)
