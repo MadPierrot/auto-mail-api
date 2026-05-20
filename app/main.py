@@ -6,6 +6,8 @@ import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Response
 
+from app.routers.autodiscoverJson import router as autodiscover_json_router
+
 load_dotenv()
 
 AUTOMX2_URL = os.getenv("AUTOMX2_URL", "http://localhost:9999").rstrip("/")
@@ -24,24 +26,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-
-@app.middleware("http")
-async def log_request(request: Request, call_next):
-    body = await request.body()
-    headers = {name: value for name, value in request.headers.items()}
-
-    logger.debug("Incoming request: %s %s", request.method, request.url)
-    logger.debug("Client: %s", request.client.host if request.client else None)
-    logger.debug("Query params: %s", dict(request.query_params))
-    logger.debug("Headers: %s", headers)
-    logger.debug("Body: %s", body.decode("utf-8", errors="replace") if body else "<empty>")
-
-    response = await call_next(request)
-    logger.debug("Response status: %s", response.status_code)
-    logger.debug("Response headers: %s", dict(response.headers))
-    return response
-
-unsafe_headers = {
+# Headers that must not be forwarded upstream
+UNSAFE_HEADERS = frozenset({
     "host",
     "connection",
     "keep-alive",
@@ -51,50 +37,92 @@ unsafe_headers = {
     "trailer",
     "transfer-encoding",
     "upgrade",
-}
+})
+
+# Headers that must not be forwarded downstream
+UNSAFE_RESPONSE_HEADERS = frozenset({
+    "content-encoding",
+    "transfer-encoding",
+    "connection",
+    "keep-alive",
+})
 
 
-@app.get("/")
-async def root() -> Dict[str, str]:
+@app.middleware("http")
+async def log_request(request: Request, call_next):
+    body = await request.body()
+    logger.debug("→ %s %s", request.method, request.url)
+    logger.debug("  Client:  %s", request.client.host if request.client else "unknown")
+    logger.debug("  Params:  %s", dict(request.query_params))
+    logger.debug("  Headers: %s", dict(request.headers))
+    logger.debug("  Body:    %s", body.decode("utf-8", errors="replace") if body else "<empty>")
+
+    response = await call_next(request)
+
+    logger.debug("← %s %s", response.status_code, request.url)
+    logger.debug("  Headers: %s", dict(response.headers))
+    return response
+
+
+@app.get("/", response_model=Dict[str, str])
+async def root():
     return {"status": "ok", "backend": AUTOMX2_URL}
 
 
-async def build_forward_headers(request: Request) -> Dict[str, str]:
-    headers = {}
-    for name, value in request.headers.items():
-        if name.lower() not in unsafe_headers:
-            headers[name] = value
-    return headers
+def build_forward_headers(request: Request) -> Dict[str, str]:
+    return {
+        name: value
+        for name, value in request.headers.items()
+        if name.lower() not in UNSAFE_HEADERS
+    }
 
 
 async def proxy_to_automx2(request: Request, target_path: str) -> Response:
-    target_url = f"{AUTOMX2_URL}/{target_path.lstrip('/')}"
+    path = target_path.lstrip("/")
+    target_url = f"{AUTOMX2_URL}/{path}"
     if request.url.query:
         target_url = f"{target_url}?{request.url.query}"
 
-    headers = await build_forward_headers(request)
+    headers = build_forward_headers(request)
     body = await request.body()
+
+    logger.debug("Proxying to: %s", target_url)
 
     async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS) as client:
         try:
-            response = await client.request(
+            upstream = await client.request(
                 method=request.method,
                 url=target_url,
                 headers=headers,
                 content=body,
                 follow_redirects=True,
             )
+        except httpx.TimeoutException as exc:
+            logger.error("Timeout contacting automx2: %s", exc)
+            raise HTTPException(status_code=504, detail=f"Timeout comunicazione con automx2: {exc}")
         except httpx.RequestError as exc:
+            logger.error("Error contacting automx2: %s", exc)
             raise HTTPException(status_code=502, detail=f"Errore di comunicazione con automx2: {exc}")
 
-    filtered_headers = {
+    response_headers = {
         name: value
-        for name, value in response.headers.items()
-        if name.lower() not in {"content-encoding", "transfer-encoding", "connection", "keep-alive"}
+        for name, value in upstream.headers.items()
+        if name.lower() not in UNSAFE_RESPONSE_HEADERS
     }
-    return Response(content=response.content, status_code=response.status_code, headers=filtered_headers)
 
+    logger.debug("Upstream response: %s, headers: %s", upstream.status_code, response_headers)
 
-@app.api_route("/{full_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+    )
+
+app.include_router(autodiscover_json_router)
+
+@app.api_route(
+    "/{full_path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+)
 async def proxy(full_path: str, request: Request) -> Response:
     return await proxy_to_automx2(request, full_path)
