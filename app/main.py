@@ -2,8 +2,10 @@
 
 import logging
 from typing import Dict
+from urllib.parse import unquote
 
 from fastapi import FastAPI, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import settings
 from app.proxy import proxy_to_automx2
@@ -21,6 +23,23 @@ app = FastAPI(
     description="Proxy FastAPI per inoltrare le richieste di autoconfigurazione verso un backend automx2.",
     version="0.1.0",
 )
+
+
+class DecodePathMiddleware(BaseHTTPMiddleware):
+    """Decodifica %40 e altri caratteri encodati nel path prima del routing."""
+    async def dispatch(self, request: Request, call_next):
+        scope = request.scope
+        raw_path = scope.get("path", "")
+        decoded_path = unquote(raw_path)
+        if decoded_path != raw_path:
+            logger.debug("Path decoded: %s → %s", raw_path, decoded_path)
+            scope["path"] = decoded_path
+            scope["raw_path"] = decoded_path.encode("utf-8")
+        return await call_next(request)
+
+
+# ⚠️ DecodePathMiddleware PRIMA del log middleware (i middleware si eseguono in ordine inverso)
+app.add_middleware(DecodePathMiddleware)
 
 
 @app.middleware("http")
