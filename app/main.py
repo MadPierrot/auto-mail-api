@@ -66,7 +66,7 @@ async def log_request(request: Request, call_next):
 
 @app.get("/", response_model=Dict[str, str])
 async def root():
-    return {"status": "ok", "backend": AUTOMX2_URL}
+    return {"status": "ok"}
 
 
 def build_forward_headers(request: Request) -> Dict[str, str]:
@@ -120,9 +120,9 @@ async def proxy_to_automx2(request: Request, target_path: str) -> Response:
 
 app.include_router(autodiscover_json_router)
 
-@app.api_route(
-    "/{full_path:path}",
-    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
-)
-async def proxy(full_path: str, request: Request) -> Response:
-    return await proxy_to_automx2(request, full_path)
+# @app.api_route(
+#     "/{full_path:path}",
+#     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+# )
+# async def proxy(full_path: str, request: Request) -> Response:
+#     return await proxy_to_automx2(request, full_path)
